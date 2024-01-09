@@ -12,7 +12,7 @@ class PID:
     error: float
 
     def __init__(self, kp, ki, kd, ke=0, out_min=float('-inf'), out_max=float('+inf'),
-                 sampling_period=0, cold_tolerance=0.3, hot_tolerance=0.3):
+                 sampling_period=0, cold_tolerance=0.3, hot_tolerance=0.3, kb=0):
         """A proportional-integral-derivative controller.
             :param kp: Proportional coefficient.
             :type kp: float
@@ -32,6 +32,8 @@ class PID:
             :type cold_tolerance: float
             :param hot_tolerance: time period between two PID calculations in seconds
             :type hot_tolerance: float
+            :param kb: Boiler temperature compensation coefficient.
+            :type kb: float
         """
         if kp is None:
             raise ValueError('kp must be specified')
@@ -46,6 +48,7 @@ class PID:
         self._Ki = ki
         self._Kd = kd
         self._Ke = ke
+        self._Kb = kb # Boiler temperature compensation coefficient 
         self._out_min = out_min
         self._out_max = out_max
         self._proportional = 0.0
@@ -60,12 +63,14 @@ class PID:
         self._error = 0
         self._input_diff = 0
         self._dext = 0
+        self._dBoiler = 0
         self._dt = 0
         self._last_output = 0
         self._output = 0
         self._proportional = 0
         self._derivative = 0
         self._external = 0
+        self._boiler = 0
         self._mode = 'AUTO'
         self._sampling_period = sampling_period
         self._cold_tolerance = cold_tolerance
@@ -129,7 +134,7 @@ class PID:
     def dt(self):
         return self._dt
 
-    def set_pid_param(self, kp=None, ki=None, kd=None, ke=None):
+    def set_pid_param(self, kp=None, ki=None, kd=None, ke=None, kb=None):
         """Set PID parameters."""
         if kp is not None and isinstance(kp, (int, float)):
             self._Kp = kp
@@ -139,6 +144,8 @@ class PID:
             self._Kd = kd
         if ke is not None and isinstance(ke, (int, float)):
             self._Ke = ke
+        if kb is not None and isinstance(kb, (int, float)):
+            self._Kb = kb
 
     def clear_samples(self):
         """Clear the samples values and timestamp to restart PID from clean state after
@@ -148,7 +155,7 @@ class PID:
         self._last_input = None
         self._last_input_time = None
         
-    def calc(self, input_val, set_point, input_time=None, last_input_time=None, ext_temp=None):
+    def calc(self, input_val, set_point, input_time=None, last_input_time=None, ext_temp=None, boiler_temp=None, boiler_set_point=None):
         """Adjusts and holds the given setpoint.
 
         Args:
@@ -158,6 +165,7 @@ class PID:
             last_input_time (float): The timestamp in seconds of the previous input value to
             compute dt
             ext_temp (float): The outdoor temperature value.
+            boiler_temp (float): The boiler temperature value.
 
         Returns:
             A value between `out_min` and `out_max`.
@@ -208,6 +216,11 @@ class PID:
             self._dext = set_point - ext_temp
         else:
             self._dext = 0
+        if boiler_temp is not None:
+            self._dBoiler = boiler_set_point - boiler_temp
+        else:
+            self._dBoiler = 0
+
 
         # In order to prevent windup, only integrate if the process is not saturated and set point
         # is stable
@@ -223,9 +236,11 @@ class PID:
             self._derivative = 0.0
         # Compensate losses due to external temperature
         self._external = self._Ke * self._dext
+        # Compensate boiler temperature starting temperature
+        self._boiler = self._Kb * self._dBoiler
 
         # Compute PID Output
-        output = self._proportional + self._integral + self._derivative + self._external
+        output = self._proportional + self._integral + self._derivative + self._external + self._boiler
         self._output = max(min(output, self._out_max), self._out_min)
         return self._output, True
 

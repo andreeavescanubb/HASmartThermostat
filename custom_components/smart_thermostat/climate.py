@@ -79,6 +79,8 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
         vol.Optional(CONF_NAME, default=const.DEFAULT_NAME): cv.string,
         vol.Optional(CONF_UNIQUE_ID, default='none'): cv.string,
         vol.Optional(const.CONF_TARGET_TEMP): vol.Coerce(float),
+        vol.Optional(const.CONF_BOILER_SENSOR): cv.entity_id,
+        vol.Optional(const.CONF_BOILER_TARGET_TEMP): vol.Coerce(float),
         vol.Optional(const.CONF_HOT_TOLERANCE, default=const.DEFAULT_TOLERANCE): vol.Coerce(float),
         vol.Optional(const.CONF_COLD_TOLERANCE, default=const.DEFAULT_TOLERANCE): vol.Coerce(
             float),
@@ -152,6 +154,8 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
         'min_temp': config.get(const.CONF_MIN_TEMP),
         'max_temp': config.get(const.CONF_MAX_TEMP),
         'target_temp': config.get(const.CONF_TARGET_TEMP),
+        'boiler_sensor_entity_id': config.get(const.CONF_BOILER_SENSOR),
+        'boiler_target_temp': config.get(const.CONF_BOILER_TARGET_TEMP),
         'hot_tolerance': config.get(const.CONF_HOT_TOLERANCE),
         'cold_tolerance': config.get(const.CONF_COLD_TOLERANCE),
         'ac_mode': config.get(const.CONF_AC_MODE),
@@ -181,6 +185,7 @@ async def async_setup_platform(hass, config, async_add_entities, discovery_info=
         'ki': config.get(const.CONF_KI),
         'kd': config.get(const.CONF_KD),
         'ke': config.get(const.CONF_KE),
+        'kb': config.get(const.CONF_KB),
         'pwm': config.get(const.CONF_PWM),
         'boost_pid_off': config.get(const.CONF_BOOST_PID_OFF),
         'autotune': config.get(const.CONF_AUTOTUNE),
@@ -248,6 +253,9 @@ class SmartThermostat(ClimateEntity, RestoreEntity, ABC):
         self._heater_polarity_invert = kwargs.get('invert_heater')
         self._sensor_entity_id = kwargs.get('sensor_entity_id')
         self._ext_sensor_entity_id = kwargs.get('ext_sensor_entity_id')
+        # add boiler sensor entity id
+        self._boiler_sensor_entity_id = kwargs.get('boiler_sensor_entity_id')
+
         if self._unique_id == 'none':
             self._unique_id = slugify(f"{DOMAIN}_{self._name}_{self._heater_entity_id}")
         self._ac_mode = kwargs.get('ac_mode', False)
@@ -279,10 +287,13 @@ class SmartThermostat(ClimateEntity, RestoreEntity, ABC):
         self._previous_temp = None
         self._previous_temp_time = None
         self._ext_temp = None
+        self._boiler_temp = None
+        self._boiler_target_temp = None
         self._temp_lock = asyncio.Lock()
         self._min_temp = kwargs.get('min_temp')
         self._max_temp = kwargs.get('max_temp')
         self._target_temp = kwargs.get('target_temp')
+        self._boiler_target_temp = kwargs.get('boiler_target_temp')
         self._unit = kwargs.get('unit')
         self._support_flags = ClimateEntityFeature.TARGET_TEMPERATURE
         self._attr_preset_mode = 'none'
@@ -316,6 +327,7 @@ class SmartThermostat(ClimateEntity, RestoreEntity, ABC):
         self._ki = kwargs.get('ki')
         self._kd = kwargs.get('kd')
         self._ke = kwargs.get('ke')
+        self._kb = kwargs.get('kb')
         self._pwm = kwargs.get('pwm').seconds
         self._p = self._i = self._d = self._e = self._dt = 0
         self._control_output = 0
@@ -337,9 +349,11 @@ class SmartThermostat(ClimateEntity, RestoreEntity, ABC):
         self._noiseband = kwargs.get('noiseband')
         self._cold_tolerance = abs(kwargs.get('cold_tolerance'))
         self._hot_tolerance = abs(kwargs.get('hot_tolerance'))
+
         self._time_changed = 0
         self._last_sensor_update = time.time()
         self._last_ext_sensor_update = time.time()
+        self._last_boiler_sensor_update = time.time()
         if self._autotune != "none":
             self._pid_controller = None
             self._pid_autotune = pid_controller.PIDAutotune(self._difference, self._lookback,
@@ -355,7 +369,8 @@ class SmartThermostat(ClimateEntity, RestoreEntity, ABC):
             self._pid_controller = pid_controller.PID(self._kp, self._ki, self._kd, self._ke,
                                                       self._min_out, self._max_out,
                                                       self._sampling_period, self._cold_tolerance,
-                                                      self._hot_tolerance)
+                                                      self._hot_tolerance,
+                                                      self._kb)
             self._pid_controller.mode = "AUTO"
 
     async def async_added_to_hass(self):
@@ -374,6 +389,12 @@ class SmartThermostat(ClimateEntity, RestoreEntity, ABC):
                     self.hass,
                     self._ext_sensor_entity_id,
                     self._async_ext_sensor_changed))
+        if self._boiler_sensor_entity_id is not None:
+            self.async_on_remove(
+                async_track_state_change(
+                    self.hass,
+                    self._boiler_sensor_entity_id,
+                    self._async_boiler_sensor_changed))
         self.async_on_remove(
             async_track_state_change(
                 self.hass,
@@ -401,7 +422,11 @@ class SmartThermostat(ClimateEntity, RestoreEntity, ABC):
             if self._ext_sensor_entity_id is not None:
                 ext_sensor_state = self.hass.states.get(self._ext_sensor_entity_id)
                 if ext_sensor_state and ext_sensor_state.state != STATE_UNKNOWN:
-                    self._async_update_ext_temp(ext_sensor_state)
+                    self._async_update_ext_temp(ext_sensor_state)                    
+            if self._boiler_sensor_entity_id is not None:
+                boiler_sensor_state = self.hass.states.get(self._boiler_sensor_entity_id)
+                if boiler_sensor_state and boiler_sensor_state.state != STATE_UNKNOWN:
+                    self._async_update_boiler_temp(boiler_sensor_state)
 
         if self.hass.state == CoreState.running:
             _async_startup()
@@ -422,6 +447,17 @@ class SmartThermostat(ClimateEntity, RestoreEntity, ABC):
                                 self.entity_id, self._target_temp)
             else:
                 self._target_temp = float(old_state.attributes.get(ATTR_TEMPERATURE))
+
+            # if we have a previously saved target boiler temperature
+            if old_state.attributes.get(const.CONF_BOILER_TARGET_TEMP) is None:
+                if self._boiler_target_temp is None:
+                    self._boiler_target_temp = self._target_temp
+                _LOGGER.warning("%s: No boiler setpoint available in old state, falling back to %s",
+                                self.entity_id, self._boiler_target_temp)
+            else:
+                self._boiler_target_temp = float(old_state.attributes.get(const.CONF_BOILER_TARGET_TEMP))
+
+            # If we have a previously saved preset mode            
             for preset_mode in ['away_temp', 'eco_temp', 'boost_temp', 'comfort_temp', 'home_temp',
                                 'sleep_temp', 'activity_temp']:
                 if old_state.attributes.get(preset_mode) is not None:
@@ -458,6 +494,13 @@ class SmartThermostat(ClimateEntity, RestoreEntity, ABC):
             elif old_state.attributes.get('Ke') is not None and self._pid_controller is not None:
                 self._ke = float(old_state.attributes.get('Ke'))
                 self._pid_controller.set_pid_param(ke=self._ke)
+            if old_state.attributes.get('kb') is not None and self._pid_controller is not None:
+                self._kb = float(old_state.attributes.get('kb'))
+                self._pid_controller.set_pid_param(kb=self._kb)
+            elif old_state.attributes.get('Kb') is not None and self._pid_controller is not None:
+                self._kb = float(old_state.attributes.get('Kb'))
+                self._pid_controller.set_pid_param(kb=self._kb)
+
             if old_state.attributes.get('pid_mode') is not None and \
                     self._pid_controller is not None:
                 self._pid_controller.mode = old_state.attributes.get('pid_mode')
@@ -539,6 +582,11 @@ class SmartThermostat(ClimateEntity, RestoreEntity, ABC):
     def target_temperature(self):
         """Return the temperature we try to reach."""
         return self._target_temp
+    
+    @property
+    def boiler_target_temperature(self):
+        """Return the boiler temperature we try to reach."""
+        return self._boiler_target_temp
 
     @property
     def preset_mode(self):
@@ -781,6 +829,8 @@ class SmartThermostat(ClimateEntity, RestoreEntity, ABC):
         gain_ki = kwargs.get('ki', None)
         gain_kd = kwargs.get('kd', None)
         gain_ke = kwargs.get('ke', None)
+        gain_kb = kwargs.get('kb', None)
+        
         if gain_kp is not None:
             self._kp = float(gain_kp)
         if gain_ki is not None:
@@ -789,7 +839,9 @@ class SmartThermostat(ClimateEntity, RestoreEntity, ABC):
             self._kd = float(gain_kd)
         if gain_ke is not None:
             self._ke = float(gain_ke)
-        self._pid_controller.set_pid_param(self._kp, self._ki, self._kd, self._ke)
+        if gain_kb is not None:
+            self._kb = float(gain_kb)
+        self._pid_controller.set_pid_param(self._kp, self._ki, self._kd, self._ke, self._kb)
         await self._async_control_heating(calc_pid=True)
 
     async def async_set_pid_mode(self, **kwargs):
@@ -892,6 +944,16 @@ class SmartThermostat(ClimateEntity, RestoreEntity, ABC):
         _LOGGER.debug("%s: Received new external temperature: %s", self.entity_id, self._ext_temp)
         await self._async_control_heating(calc_pid=False)
 
+    async def _async_boiler_sensor_changed(self, entity_id, old_state, new_state):
+        """Handle temperature changes."""
+        if new_state is None:
+            return
+
+        self._async_update_boiler_temp(new_state)
+        self._trigger_source = 'boiler_sensor'
+        _LOGGER.debug("%s: Received new boiler temperature: %s", self.entity_id, self._boiler_temp)
+        await self._async_control_heating(calc_pid=False)
+
     @callback
     def _async_switch_changed(self, entity_id, old_state, new_state):
         """Handle heater switch state changes."""
@@ -919,6 +981,16 @@ class SmartThermostat(ClimateEntity, RestoreEntity, ABC):
         except ValueError as ex:
             _LOGGER.debug("%s: Unable to update from sensor %s: %s", self.entity_id,
                           self._ext_sensor_entity_id, ex)
+            
+    @callback
+    def _async_update_boiler_temp(self, state):
+        """Update thermostat with latest state from sensor."""
+        try:
+            self._boiler_temp = float(state.state)
+            self._last_boiler_sensor_update = time.time()
+        except ValueError as ex:
+            _LOGGER.debug("%s: Unable to update from sensor %s: %s", self.entity_id,
+                          self._boiler_sensor_entity_id, ex)
 
     async def _async_control_heating(self, time_func=None, calc_pid=False):
         """Run PID controller, optional autotune for faster integration"""
@@ -1076,13 +1148,14 @@ class SmartThermostat(ClimateEntity, RestoreEntity, ABC):
                     self._ki = params.Ki
                     self._kd = params.Kd
                     _LOGGER.warning("%s: Now running on PID Controller using "
-                                    "rule %s: Kp=%s, Ki=%s, Kd=%s", self.entity_id,
-                                    self._autotune, self._kp, self._ki, self._kd)
+                                    "rule %s: Kp=%s, Ki=%s, Kd=%s, Kb=%s", self.entity_id,
+                                    self._autotune, self._kp, self._ki, self._kd, self._kb)
                     self._pid_controller = pid_controller.PID(self._kp, self._ki, self._kd,
                                                               self._ke, self._min_out,
                                                               self._max_out, self._sampling_period,
                                                               self._cold_tolerance,
-                                                              self._hot_tolerance)
+                                                              self._hot_tolerance,
+                                                              self._kb)
                     self._autotune = "none"
             self._control_output = self._pid_autotune.output
             self._p = self._i = self._d = error = self._dt = 0
@@ -1092,11 +1165,15 @@ class SmartThermostat(ClimateEntity, RestoreEntity, ABC):
                                                                          self._target_temp,
                                                                          self._cur_temp_time,
                                                                          self._previous_temp_time,
-                                                                         self._ext_temp)
+                                                                         self._ext_temp,
+                                                                         self._boiler_temp,
+                                                                         self._boiler_target_temp)
             else:
                 self._control_output, update = self._pid_controller.calc(self._current_temp,
                                                                          self._target_temp,
-                                                                         ext_temp=self._ext_temp)
+                                                                         ext_temp=self._ext_temp,
+                                                                         boiler_temp=self._boiler_temp,
+                                                                         boiler_set_point=self._boiler_target_temp)
             self._p = round(self._pid_controller.proportional, 1)
             self._i = round(self._pid_controller.integral, 1)
             self._d = round(self._pid_controller.derivative, 1)
