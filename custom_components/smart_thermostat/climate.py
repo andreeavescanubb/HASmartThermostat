@@ -123,6 +123,7 @@ PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
         vol.Optional(const.CONF_KI, default=const.DEFAULT_KI): vol.Coerce(float),
         vol.Optional(const.CONF_KD, default=const.DEFAULT_KD): vol.Coerce(float),
         vol.Optional(const.CONF_KE, default=const.DEFAULT_KE): vol.Coerce(float),
+        vol.Optional(const.CONF_KB, default=const.DEFAULT_KB): vol.Coerce(float),
         vol.Optional(const.CONF_PWM, default=const.DEFAULT_PWM): vol.All(
             cv.time_period, cv.positive_timedelta
         ),
@@ -830,7 +831,7 @@ class SmartThermostat(ClimateEntity, RestoreEntity, ABC):
         gain_kd = kwargs.get('kd', None)
         gain_ke = kwargs.get('ke', None)
         gain_kb = kwargs.get('kb', None)
-        
+
         if gain_kp is not None:
             self._kp = float(gain_kp)
         if gain_ki is not None:
