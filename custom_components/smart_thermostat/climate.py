@@ -458,7 +458,7 @@ class SmartThermostat(ClimateEntity, RestoreEntity, ABC):
             else:
                 self._boiler_target_temp = float(old_state.attributes.get(const.CONF_BOILER_TARGET_TEMP))
 
-            # If we have a previously saved preset mode            
+            # If we have a previously saved preset mode
             for preset_mode in ['away_temp', 'eco_temp', 'boost_temp', 'comfort_temp', 'home_temp',
                                 'sleep_temp', 'activity_temp']:
                 if old_state.attributes.get(preset_mode) is not None:
@@ -583,7 +583,7 @@ class SmartThermostat(ClimateEntity, RestoreEntity, ABC):
     def target_temperature(self):
         """Return the temperature we try to reach."""
         return self._target_temp
-    
+
     @property
     def boiler_target_temperature(self):
         """Return the boiler temperature we try to reach."""
@@ -1038,12 +1038,12 @@ class SmartThermostat(ClimateEntity, RestoreEntity, ABC):
     @property
     def _is_device_active(self):
         if self._pwm:
-            """If the toggleable device is currently active."""
+            #If the toggleable device is currently active.
             if self._heater_polarity_invert:
                 return self.hass.states.is_state(self.heater_or_cooler_entity, STATE_OFF)
             return self.hass.states.is_state(self.heater_or_cooler_entity, STATE_ON)
         else:
-            """If the valve device is currently active."""
+            #If the valve device is currently active.
             return float(self.hass.states.get(self.heater_or_cooler_entity).state) > 0
       
     @property
